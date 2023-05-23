@@ -20,16 +20,18 @@ resampling.str<-function(mm,ww){
   for(j in 2:mm) index <- c(index,rep.int(j,mj[j]-mj[j-1]))
   return(index)
 }
-data_gen=function(pop, I0, S0=pop-I0, N, t, reco_rate, trans_rate, sigma_I, sigma_y){
+data_gen=function(pop, I0, S0=pop-I0, N, t, Kd, reco_rate, trans_rate, sigma_I, sigma_y){
   x_S = x_I = x_R = y = matrix(NA, nrow = N, ncol = t+1)
   x_I[,1] = I0
   x_S[,1] = S0
-  x_R[,1] = pop-I0-S0 
+  x_R[,1] = pop - I0 - S0 
   for(i in 1:t){
     ww = rnorm(N, 0, sigma_I)
-    x_I[,i+1] = (1-reco_rate)*x_I[,i]+trans_rate*x_S[,i]*x_I[,i]+ww
-    x_S[,i+1] = x_S[,i]-trans_rate*x_S[,i]*x_I[,i]-ww
-    x_R[,i+1] = pop-x_I[,i+1]-x_S[,i+1]
+    #x_I[,i+1] = (1-reco_rate)*x_I[,i]+trans_rate*x_S[,i]*x_I[,i]+ww
+    #x_S[,i+1] = x_S[,i]-trans_rate*x_S[,i]*x_I[,i]-ww
+    x_I[,i+1] = (1-reco_rate)*x_I[,i] + as.vector(matrix(diag(trans_rate*x_S[,i]),ncol=N)%*% Kd %*% x_I[,i]) + ww
+    x_S[,i+1] = x_S[,i] - as.vector(matrix(diag(trans_rate*x_S[,i]),ncol=N)%*% Kd %*% x_I[,i]) - ww
+    x_R[,i+1] = pop-x_I[,i+1] - x_S[,i+1]
     y[,i+1] = x_I[,i+1]+rnorm(N, 0, sigma_y)
   }
   
@@ -38,7 +40,7 @@ data_gen=function(pop, I0, S0=pop-I0, N, t, reco_rate, trans_rate, sigma_I, sigm
               sigma_I=sigma_I, sigma_y=sigma_y, t=t, N=N, pop=pop))
 }
 
-ekf_smc=function(dat, m, resam_sdl, lambda, SCORE=TRUE, seed=NULL, 
+ekf_smc=function(dat, m, resampling, lambda, SCORE=TRUE, seed=NULL, 
                   trans_rate, reco_rate, sigI_h, sigy_h){
   # Set seed
   if(!is.null(seed)) set.seed(seed)
@@ -48,7 +50,7 @@ ekf_smc=function(dat, m, resam_sdl, lambda, SCORE=TRUE, seed=NULL,
   y = dat$y
   N = dat$N
   S = Imat = lgW = lgW_lag = array(NA, c(N, m, t+1))
-  alp=array(NA, c(N, m, t+1, 2))
+  alp = array(NA, c(N, m, t+1, 2))
   Imat[ , ,1] = matrix(rep(dat$x_I[,1],m), nrow=N, ncol=m, byrow=FALSE)
   S[ , ,1] = matrix(rep(dat$x_S[,1],m), nrow=N, ncol=m, byrow=FALSE)
   lgW[ , ,1] = 0
@@ -61,8 +63,11 @@ ekf_smc=function(dat, m, resam_sdl, lambda, SCORE=TRUE, seed=NULL,
   mu_I[ , ,1] = matrix(rep(dat$x_I[,1], m), nrow=N, ncol=m, byrow=FALSE)
   
   for (j in 1:t) {
-    mu_cond_I[ , ,j+1] = (1 - reco_rate + trans_rate * S[ , ,j])*mu_I[ , ,j]
-    sigma_cond[ , ,j+1] = sigma[ , ,j] * (1 - reco_rate + trans_rate *S[, ,j] - trans_rate * mu_I[, ,j])^2 + sigI_h^2
+    # mu_cond_I[ , ,j+1] = (1 - reco_rate + trans_rate * S[ , ,j] )*mu_I[ , ,j]
+    # sigma_cond[ , ,j+1] = sigma[ , ,j] * (1 - reco_rate + trans_rate *S[, ,j] - trans_rate * mu_I[, ,j] )^2 + sigI_h^2
+    
+    mu_cond_I[ , ,j+1] = (1 - reco_rate + trans_rate * apply(Kd,1,sum) * S[ , ,j])*mu_I[ , ,j]
+    sigma_cond[ , ,j+1] = sigma[ , ,j] * (1 - reco_rate + trans_rate * apply(Kd,1,sum) *S[, ,j]  - trans_rate * apply(Kd,1,sum) * mu_I[, ,j] )^2 + sigI_h^2
     indx = is.na(y[,j+1])
     K_t = sigma_cond[ , ,j+1]/(sigma_cond[ , ,j+1] + sigy_h^2) 
     K_t[indx,] = y[indx,j+1] = 0
@@ -97,7 +102,7 @@ ekf_smc=function(dat, m, resam_sdl, lambda, SCORE=TRUE, seed=NULL,
     }
     
     # Resampling
-    if(resam_sdl[j]==1){
+    if(resampling[j]==1){
       ww=exp(lgW[ , ,j+1])
       sumww=apply(ww,MARGIN=1,FUN=sum)
       ww_prob=ww/sumww
@@ -107,7 +112,7 @@ ekf_smc=function(dat, m, resam_sdl, lambda, SCORE=TRUE, seed=NULL,
         lgW[l, ,j+1]=0
         loglike[l] =loglike[l]+log(mean(ww[l,]))}
       } 
-    else if(resam_sdl[j]==2){
+    else if(resampling[j]==2){
       ww=exp(lgW[ , ,j+1])
       sumww=apply(ww,MARGIN=1,FUN=sum)
       ww_prob=ww/sumww
@@ -122,7 +127,7 @@ ekf_smc=function(dat, m, resam_sdl, lambda, SCORE=TRUE, seed=NULL,
   }
   
   w_T=exp(lgW[ , ,t+1])
-  if(resam_sdl[t]==0){
+  if(resampling[t]==0){
     loglike=loglike+log(apply(w_T,1,mean))
   }
   
@@ -154,13 +159,14 @@ reco_rate = rnorm(N, mean = 1-(0.5)^(1/8), sd = 1e-2)
 trans_rate = rnorm(N, mean = reco_rate/1e4, sd = 1e-6)
 sigma_I = 20+rnorm(10,1:10,1)
 sigma_y = 20+rnorm(10,1:10,1)
+Kd = diag(N)
 m=1000
-dat = data_gen(pop, I0, S0, N, t, reco_rate, trans_rate, sigma_I, sigma_y)
+dat = data_gen(pop, I0, S0, N, t, Kd,reco_rate, trans_rate, sigma_I, sigma_y)
 
 #EKF-SMC
 set.seed(1)
 trans_rate=dat$trans_rate*1; reco_rate=dat$reco_rate*1
-resu_plpo=ekf_smc(dat=dat, m=m, lambda=0.9, resam_sdl=rep(rep(c(0,1,0,2),c(1,1,1,1)), 10),
+resu_plpo=ekf_smc(dat=dat, m=m, lambda=0.9, resampling=rep(rep(c(0,1,0,2),c(1,1,1,1)), 10),
                     SCORE=1, seed=NULL, trans_rate=trans_rate, reco_rate=reco_rate, 
                     sigI_h=dat$sigma_I, sigy_h=dat$sigma_y)
 
